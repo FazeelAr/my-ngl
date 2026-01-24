@@ -1,6 +1,5 @@
 // api.js
-const API_URL = 'http://localhost:8000';
-
+const API_URL = 'http://nglbackend.famtrixsolutions.com:8001';
 export const api = {
   // Auth
   signup: async (email, username, password) => {
@@ -71,5 +70,36 @@ export const api = {
       },
     });
     return res.json();
+  },
+
+  connectWebSocket: (nglId, onMessage) => {
+    const wsUrl = `ws://localhost:8000/ws/${nglId}`;
+    console.log('Connecting to WebSocket:', wsUrl);
+    
+    const ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => {
+      console.log('WebSocket connected for NGL:', nglId);
+    };
+    
+    ws.onmessage = (event) => {
+      console.log('WebSocket message received:', event.data);
+      try {
+        const data = JSON.parse(event.data);
+        onMessage(data);
+      } catch (err) {
+        console.error('Failed to parse WebSocket message:', err);
+      }
+    };
+    
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+    
+    ws.onclose = () => {
+      console.log('WebSocket disconnected for NGL:', nglId);
+    };
+    
+    return ws;
   },
 };

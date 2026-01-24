@@ -1,5 +1,5 @@
 // pages/RespondNGL.js
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 
@@ -12,10 +12,41 @@ export default function RespondNGL() {
   const [responderName, setResponderName] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const wsRef = useRef(null);
 
   useEffect(() => {
     fetchData();
+  }, [nglId]);
+
+  useEffect(() => {
+    console.log('Setting up WebSocket for NGL:', nglId);
+    
+    // Connect to WebSocket after component mounts
+    const ws = api.connectWebSocket(nglId, (data) => {
+      console.log('Received message in component:', data);
+      if (data.type === 'new_response') {
+        console.log('Adding new response from WebSocket:', data.data);
+        setResponses((prev) => {
+          // Check if response already exists (to avoid duplicates)
+          const exists = prev.some(r => r.id === data.data.id);
+          if (exists) {
+            console.log('Response already exists, skipping duplicate');
+            return prev;
+          }
+          const updated = [data.data, ...prev];
+          console.log('Updated responses:', updated);
+          return updated;
+        });
+      }
+    });
+    wsRef.current = ws;
+
+    return () => {
+      console.log('Cleaning up WebSocket for NGL:', nglId);
+      if (wsRef.current) wsRef.current.close();
+    };
   }, [nglId]);
 
   const fetchData = async () => {
@@ -24,11 +55,25 @@ export default function RespondNGL() {
       setNgl(nglData);
 
       const respData = await api.getResponses(nglId);
-      setResponses(respData);
+      // Sort by created_at descending so newest is first
+      const sorted = Array.isArray(respData) ? respData.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)) : [];
+      setResponses(sorted);
     } catch (err) {
       setError('Failed to load NGL');
     }
     setLoading(false);
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const respData = await api.getResponses(nglId);
+      const sorted = Array.isArray(respData) ? respData.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)) : [];
+      setResponses(sorted);
+    } catch (err) {
+      setError('Failed to refresh responses');
+    }
+    setRefreshing(false);
   };
 
   const handleSubmit = async () => {
@@ -46,11 +91,23 @@ export default function RespondNGL() {
     setError('');
 
     try {
-      await api.submitResponse(nglId, message, responderName || null);
+      console.log('Submitting response for NGL:', nglId);
+      const result = await api.submitResponse(nglId, message, responderName || null);
+      console.log('Response submitted successfully:', result);
       setMessage('');
       setResponderName('');
-      fetchData();
+      
+      // Immediately add to responses for current user
+      const newResponse = {
+        id: result.response_id,
+        ngl_id: nglId,
+        message: result.message,
+        responder_name: result.responder_name,
+        created_at: new Date().toISOString()
+      };
+      setResponses((prev) => [newResponse, ...prev]);
     } catch (err) {
+      console.error('Failed to submit response:', err);
       setError('Failed to submit response');
     }
     setSubmitting(false);
@@ -112,13 +169,24 @@ export default function RespondNGL() {
           className="w-full px-4 py-2 border border-gray-300 rounded-lg mb-3 focus:outline-none focus:ring-2 focus:ring-purple-500 h-24 resize-none"
         />
 
-        <button
-          onClick={handleSubmit}
-          disabled={submitting}
-          className="w-full py-2 bg-pink-600 text-white rounded-lg hover:bg-pink-700 font-semibold disabled:opacity-50"
-        >
-          {submitting ? 'Submitting...' : 'Submit Response'}
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={handleSubmit}
+            disabled={submitting}
+            className="flex-1 py-2 bg-pink-600 text-white rounded-lg hover:bg-pink-700 font-semibold disabled:opacity-50"
+          >
+            {submitting ? 'Submitting...' : 'Submit Response'}
+          </button>
+
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-semibold disabled:opacity-50"
+            title="Refresh responses"
+          >
+            {refreshing ? '⟳' : '⟳'} Refresh
+          </button>
+        </div>
       </div>
 
       <div>
