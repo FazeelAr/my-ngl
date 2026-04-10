@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Header
+from fastapi import FastAPI, HTTPException, Depends, status, Header, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 import jwt
 from passlib.context import CryptContext
+import asyncio
 
 load_dotenv()
 
@@ -45,6 +46,33 @@ class CreateNGLRequest(BaseModel):
 class SubmitResponseRequest(BaseModel):
     message: str
     responder_name: str | None = None
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict = {}
+
+    async def connect(self, ngl_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if ngl_id not in self.active_connections:
+            self.active_connections[ngl_id] = []
+        self.active_connections[ngl_id].append(websocket)
+
+    def disconnect(self, ngl_id: str, websocket: WebSocket):
+        if ngl_id in self.active_connections:
+            self.active_connections[ngl_id].remove(websocket)
+            if not self.active_connections[ngl_id]:
+                del self.active_connections[ngl_id]
+
+    async def broadcast(self, ngl_id: str, message: dict):
+        if ngl_id in self.active_connections:
+            for connection in self.active_connections[ngl_id]:
+                try:
+                    await connection.send_json(message)
+                except:
+                    pass
+
+manager = ConnectionManager()
 
 # Auth Helpers
 def hash_password(password: str):
@@ -163,7 +191,7 @@ def get_ngl(ngl_id: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/ngl/{ngl_id}/respond")
-def submit_response(ngl_id: str, req: SubmitResponseRequest):
+async def submit_response(ngl_id: str, req: SubmitResponseRequest):
     try:
         ngl = supabase.table("ngls").select("*").eq("id", ngl_id).execute()
         if not ngl.data:
@@ -176,16 +204,33 @@ def submit_response(ngl_id: str, req: SubmitResponseRequest):
             raise HTTPException(status_code=400, detail="Name required for non-anonymous NGL")
         
         response_id = str(uuid.uuid4())
+        created_at = datetime.utcnow().isoformat()
+        
         supabase.table("responses").insert({
             "id": response_id,
             "ngl_id": ngl_id,
             "message": req.message,
             "responder_name": responder_name,
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": created_at
         }).execute()
         
+        response_data = {
+            "id": response_id,
+            "ngl_id": ngl_id,
+            "message": req.message,
+            "responder_name": responder_name,
+            "created_at": created_at
+        }
+        
+        # Broadcast to all connected clients
+        print(f"Broadcasting to NGL {ngl_id}: {response_data}")
+        await manager.broadcast(ngl_id, {"type": "new_response", "data": response_data})
+        
         return {"response_id": response_id, "message": req.message, "responder_name": responder_name}
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Error in submit_response: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/ngl/{ngl_id}/responses")
@@ -212,6 +257,19 @@ def get_user_ngls(user_id: str, authorization: str = Header(None)):
         return ngls.data
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.websocket("/ws/{ngl_id}")
+async def websocket_endpoint(ngl_id: str, websocket: WebSocket):
+    await manager.connect(ngl_id, websocket)
+    print(f"WebSocket connected for NGL: {ngl_id}")
+    print(f"Total connections for {ngl_id}: {len(manager.active_connections.get(ngl_id, []))}")
+    try:
+        while True:
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(ngl_id, websocket)
+        print(f"WebSocket disconnected for NGL: {ngl_id}")
+        print(f"Total connections for {ngl_id}: {len(manager.active_connections.get(ngl_id, []))}")
 
 @app.get("/health")
 def health():
